@@ -3,26 +3,30 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import matplotlib.pyplot as plt
-
-
+from tslearn.backend import instantiate_backend
+from tslearn.metrics import SoftDTWLossPyTorch
 class KernelSimilarityOptimizer:
     """
     Finds optimal linear transformation T that maximizes k(TX, Y)
     where k is a kernel similarity measure.
     """
     
-    def __init__(self, input_dim, output_dim, kernel_type='rbf', kernel_param=1.0):
+    def __init__(self, input_dim, output_dim, kernel_type='rbf', kernel_param=1.0, lambda_reg=0.0):
         """
         Args:
             input_dim: Dimension of input time series X
             output_dim: Dimension of output time series Y
             kernel_type: 'rbf', 'linear', or 'polynomial'
             kernel_param: Kernel parameter (sigma for RBF, degree for polynomial)
+            lambda_reg: Regularization parameter for T (norm penalty)
         """
+        
+        self.be = instantiate_backend("pytorch") ## This is for softDTW and time series kernels
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.kernel_type = kernel_type
         self.kernel_param = kernel_param
+        self.lambda_reg = lambda_reg
         
         # Initialize transformation matrix T
         self.T = nn.Parameter(torch.randn(output_dim, input_dim) * 0.01)
@@ -60,7 +64,9 @@ class KernelSimilarityOptimizer:
             X_norm = X / (X.norm(dim=1, keepdim=True) + 1e-8)
             Y_norm = Y / (Y.norm(dim=1, keepdim=True) + 1e-8)
             return (X_norm @ Y_norm.T).mean()
-        
+        elif self.kernel_type == 'dtw':
+            dtw_ker = -SoftDTWLossPyTorch(gamma=self.kernel_param)(X.unsqueeze(0), Y.unsqueeze(0))
+            return dtw_ker
         else:
             raise ValueError(f"Unknown kernel type: {self.kernel_type}")
     
@@ -92,7 +98,7 @@ class KernelSimilarityOptimizer:
             kernel_sim = self.compute_kernel(TX, Y)
             
             # We want to maximize similarity, so minimize negative similarity
-            loss = -kernel_sim
+            loss = -kernel_sim + self.lambda_reg * torch.norm(self.T)
             
             # Backward pass
             loss.backward()
@@ -103,8 +109,8 @@ class KernelSimilarityOptimizer:
             history['kernel_sim'].append(kernel_sim.item())
             
             if verbose and (i + 1) % 100 == 0:
-                print(f"Iteration {i+1}/{n_iterations}, "
-                      f"Kernel Similarity: {kernel_sim.item():.6f}")
+                print(f"Iteration {i+1}/{n_iterations} ",
+                      f"Kernel Similarity: {   kernel_sim.item():.6f}")
         
         return self.T.detach(), history
 
@@ -130,9 +136,9 @@ if __name__ == "__main__":
     np.random.seed(42)
     
     # Generate synthetic data
-    n_samples = 200
-    input_dim = 8
-    output_dim = 5
+    n_samples = 1
+    input_dim = 1000
+    output_dim = 1000
     X, Y, T_true = generate_example_data(n_samples, input_dim, output_dim)
     
     print(f"Data shapes: X={X.shape}, Y={Y.shape}")
@@ -142,8 +148,9 @@ if __name__ == "__main__":
     optimizer = KernelSimilarityOptimizer(
         input_dim=input_dim,
         output_dim=output_dim,
-        kernel_type='rbf',
-        kernel_param=1.0
+        kernel_type='dtw',
+        kernel_param=100,
+        lambda_reg=0.0
     )
     
     # Optimize
@@ -184,3 +191,4 @@ if __name__ == "__main__":
     print(f"\nInitial random T kernel similarity: {init_sim.item():.6f}")
     print(f"Optimized T kernel similarity: {optimal_sim.item():.6f}")
     print(f"Improvement: {(optimal_sim - init_sim).item():.6f}")
+    print(f"From norm of difference T_optimal - T_true: {torch.norm(T_optimal - T_true).item():.6f}")
